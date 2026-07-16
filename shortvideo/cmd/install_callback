@@ -1,0 +1,4 @@
+#!/bin/bash
+# 安装后：确保运行数据目录存在。
+mkdir -p "$TRIM_PKGVAR" 2>/dev/null || true
+exit 0

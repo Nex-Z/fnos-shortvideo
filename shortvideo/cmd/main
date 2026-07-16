@@ -1,0 +1,112 @@
+#!/bin/bash
+# 飞牛随机短视频 - 启停脚本
+# 处理 start / stop / status，按架构选择 Go 二进制。
+
+set -u
+
+LOG_FILE="${TRIM_PKGVAR}/app.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+APP_DIR="${TRIM_APPDEST}"
+BIN_DIR="${APP_DIR}/bin"
+WWW_DIR="${APP_DIR}/ui/www"
+GATEWAY_PREFIX="/app/shortvideo"
+SOCKET_PATH="${APP_DIR}/app.sock"
+
+# 按架构选择二进制
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64)  BIN="${BIN_DIR}/shortvideo-server-amd64" ;;
+  aarch64|arm64) BIN="${BIN_DIR}/shortvideo-server-arm64" ;;
+  *)
+    echo "不支持的架构: $ARCH" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$BIN" ]; then
+  echo "未找到可执行文件: $BIN" > "$TRIM_TEMP_LOGFILE"
+  exit 1
+fi
+# 安全网：确保二进制有执行位（Windows 打包可能丢失 +x）
+chmod +x "$BIN" 2>/dev/null || true
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+check_process() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
+status_app() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if [ -n "$pid" ] && check_process "$pid"; then
+      return 0
+    fi
+    rm -f "$PID_FILE"
+  fi
+  return 1
+}
+
+start_app() {
+  if status_app; then
+    return 0
+  fi
+  log_msg "Starting shortvideo (arch=$ARCH)..."
+
+  mkdir -p "$TRIM_PKGVAR"
+  # 清理残留 socket
+  rm -f "$SOCKET_PATH"
+
+  SOCKET_PATH="$SOCKET_PATH" \
+  GATEWAY_PREFIX="$GATEWAY_PREFIX" \
+  DATA_DIR="$TRIM_PKGVAR" \
+  WWW_DIR="$WWW_DIR" \
+  TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS:-}" \
+  "$BIN" >> "$LOG_FILE" 2>&1 &
+
+  echo "$!" > "$PID_FILE"
+  log_msg "Started, pid=$!"
+}
+
+stop_app() {
+  log_msg "Stopping shortvideo..."
+  if [ ! -f "$PID_FILE" ]; then
+    rm -f "$SOCKET_PATH"
+    return 0
+  fi
+  local pid
+  pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+  if [ -z "$pid" ] || ! check_process "$pid"; then
+    rm -f "$PID_FILE" "$SOCKET_PATH"
+    return 0
+  fi
+  kill -TERM "$pid" 2>> "$LOG_FILE" || true
+  local count=0
+  while check_process "$pid" && [ "$count" -lt 10 ]; do
+    sleep 1
+    count=$((count + 1))
+  done
+  if check_process "$pid"; then
+    kill -KILL "$pid" 2>> "$LOG_FILE" || true
+  fi
+  rm -f "$PID_FILE" "$SOCKET_PATH"
+  log_msg "Stopped."
+}
+
+case "$1" in
+  start)   start_app ;;
+  stop)    stop_app ;;
+  status)
+    if status_app; then exit 0; fi
+    exit 3
+    ;;
+  *)
+    echo "未知命令: $1（支持 start/stop/status）" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+    ;;
+esac

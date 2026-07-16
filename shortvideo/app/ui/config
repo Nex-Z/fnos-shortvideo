@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "shortvideo.main": {
+      "title": "随机短视频",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/shortvideo",
+      "gatewaySocket": "app.sock",
+      "url": "/app/shortvideo",
+      "allUsers": true
+    }
+  }
+}

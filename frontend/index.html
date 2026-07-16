@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>随机短视频</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 视频流：3 槽轮播（上/当前/下） -->
+    <div id="feed">
+      <div id="track">
+        <div class="slot" data-pos="prev"><video playsinline webkit-playsinline preload="auto"></video></div>
+        <div class="slot" data-pos="current"><video playsinline webkit-playsinline preload="auto"></video></div>
+        <div class="slot" data-pos="next"><video playsinline webkit-playsinline preload="auto"></video></div>
+      </div>
+
+      <!-- 覆盖层：交互控件 -->
+      <div id="overlay">
+        <!-- 顶部：静音 / 循环 -->
+        <div class="top-bar">
+          <button class="icon-btn" id="btn-mute" title="静音">
+            <svg viewBox="0 0 24 24" class="ico ico-muted"><path d="M4 9v6h4l5 5V4L8 9H4z"/></svg>
+            <svg viewBox="0 0 24 24" class="ico ico-sound" style="display:none"><path d="M4 9v6h4l5 5V4L8 9H4z"/><path d="M16 8a5 5 0 010 8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <div class="app-title">随机短视频</div>
+          <button class="icon-btn" id="btn-loop" title="循环">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+          </button>
+        </div>
+
+        <!-- 右侧操作栏 -->
+        <div class="right-rail">
+          <button class="rail-btn" id="btn-fav">
+            <svg viewBox="0 0 24 24" class="ico ico-heart"><path d="M12 21s-7-4.5-9.5-9C1 9 2.5 5 6 5c2 0 3.5 1 6 3.5C14.5 6 16 5 18 5c3.5 0 5 4 3.5 7-2.5 4.5-9.5 9-9.5 9z"/></svg>
+            <span class="rail-label">收藏</span>
+          </button>
+          <button class="rail-btn" id="btn-history">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M13 3a9 9 0 109 9h-2a7 7 0 11-7-7v3l4-4-4-4v3z"/><path d="M13 8v5l4 2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+            <span class="rail-label">历史</span>
+          </button>
+          <button class="rail-btn" id="btn-settings">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm9 4l-2-1 1-2-2-2-2 1-1-2h-2l-1 2-2-1-2 2 1 2-2 1v2l2 1-1 2 2 2 2-1 1 2h2l1-2 2 1 2-2-1-2 2-1z" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+            <span class="rail-label">设置</span>
+          </button>
+          <button class="rail-btn" id="btn-rescan">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M4 12a8 8 0 0114-5l2-2v6h-6l2-2a6 6 0 00-10 3H4zm16 0a8 8 0 01-14 5l-2 2v-6h6l-2 2a6 6 0 0010-3h2z"/></svg>
+            <span class="rail-label">重扫</span>
+          </button>
+        </div>
+
+        <!-- 底部：文件名 + 进度条 -->
+        <div class="bottom-bar">
+          <div class="video-title" id="video-title">—</div>
+          <div class="progress-row">
+            <span class="time" id="time-cur">0:00</span>
+            <div class="progress" id="progress">
+              <div class="progress-buffered" id="progress-buffered"></div>
+              <div class="progress-played" id="progress-played"></div>
+              <div class="progress-thumb" id="progress-thumb"></div>
+            </div>
+            <span class="time" id="time-dur">0:00</span>
+          </div>
+        </div>
+
+        <!-- 中央播放/加载指示 -->
+        <div class="center-hint" id="center-hint" style="display:none">
+          <div class="spinner"></div>
+        </div>
+        <div class="play-tap" id="play-tap" style="display:none">
+          <svg viewBox="0 0 24 24" class="ico big"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+      </div>
+
+      <!-- 空状态 -->
+      <div id="empty-state" class="panel-center" style="display:none">
+        <div class="empty-card">
+          <svg viewBox="0 0 24 24" class="ico big empty-ico"><path d="M4 6h16v12H4z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 9l5 3-5 3z"/></svg>
+          <h2 id="empty-title">暂无视频</h2>
+          <p id="empty-desc">请在飞牛应用设置中为本应用授权视频目录，然后点击下方按钮重新扫描。</p>
+          <button class="primary-btn" id="btn-empty-rescan">重新扫描</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 历史面板 -->
+    <div id="panel-history" class="side-panel" style="display:none">
+      <div class="panel-head">
+        <h3>历史记录</h3>
+        <button class="icon-btn" id="btn-close-history">✕</button>
+      </div>
+      <div class="panel-body" id="history-list"></div>
+    </div>
+
+    <!-- 设置面板 -->
+    <div id="panel-settings" class="side-panel" style="display:none">
+      <div class="panel-head">
+        <h3>设置</h3>
+        <button class="icon-btn" id="btn-close-settings">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="setting-row">
+          <div class="setting-label">已授权目录</div>
+          <div class="setting-value" id="setting-roots">—</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">已索引视频</div>
+          <div class="setting-value" id="setting-count">—</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">扫描状态</div>
+          <div class="setting-value" id="setting-scan">—</div>
+        </div>
+        <div class="setting-actions">
+          <button class="primary-btn" id="btn-setting-rescan">重新扫描</button>
+        </div>
+        <div class="setting-hint">
+          提示：要添加或修改视频目录，请到飞牛 fnOS 应用中心 → 本应用 → 设置 → 授权目录 中配置。
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" style="display:none"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
