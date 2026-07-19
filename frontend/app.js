@@ -22,7 +22,8 @@
   const elBuffered = $('#progress-buffered');
   const elThumb = $('#progress-thumb');
   const progressBar = $('#progress');
-  const btnMute = $('#btn-mute'), btnLoop = $('#btn-loop'), btnFav = $('#btn-fav');
+  const btnMute = $('#btn-mute'), btnFav = $('#btn-fav');
+  const btnLoopSetting = $('#btn-loop-setting');
   const centerHint = $('#center-hint'), playTap = $('#play-tap');
   const emptyState = $('#empty-state');
 
@@ -36,6 +37,7 @@
     loop: true,
     busy: false,      // 动画/切换中，拒绝新滑动
     panelOpen: false,
+    landscape: false, // 横屏观影模式
     lastSaveTs: 0,
   };
 
@@ -111,6 +113,20 @@
   }
 
   function showPlayTap() { playTap.style.display = 'flex'; }
+
+  // 恢复保存的播放进度（仅当元素尚无自身位置时；保留状态的元素自带位置不覆盖）
+  function resumeProgress(v, prog) {
+    if (!prog || !prog.pos || prog.pos < 3) return;
+    const apply = () => {
+      if (!v.duration) return;
+      if (v.currentTime > 3) return; // 元素已有位置（如立即回切保留的状态），不覆盖
+      if (prog.pos < v.duration - 2) {
+        try { v.currentTime = prog.pos; } catch (e) {}
+      }
+    };
+    if (v.readyState >= 1) apply();
+    else v.addEventListener('loadedmetadata', apply, { once: true });
+  }
 
   // ---------- 覆盖层更新 ----------
   function updateOverlay() {
@@ -203,23 +219,27 @@
   }
 
   // ---------- 滑动切换 ----------
+  // 视频流高度（= 单槽高度）。用实际像素而非 vh：移动端地址栏显隐时 vh(含浏览器栏)
+  // 与 dvh(动态视口) 不一致，会导致轮播 translate 量与槽高错位、画面偏移。
+  function feedHeight() { return document.getElementById('feed').clientHeight; }
   function snapToCurrent(noAnim) {
     track.classList.toggle('no-anim', !!noAnim);
-    track.style.transform = 'translateY(-100vh)';
+    track.style.transform = 'translateY(-' + feedHeight() + 'px)';
     if (noAnim) void track.offsetWidth; // 强制重排
     track.classList.remove('no-anim');
   }
 
   async function swipe(direction) {
-    if (state.busy || state.panelOpen) return;
+    if (state.busy || state.panelOpen || state.landscape) return;
     // direction: 'up' = 下一个, 'down' = 上一个
     const targetSlot = direction === 'up' ? slots.next : slots.prev;
     const targetId = direction === 'up' ? state.nextId : state.prevId;
     if (!targetId) return; // 到边界
     state.busy = true;
     try {
-      const targetY = direction === 'up' ? '-200vh' : '0vh';
-      track.style.transform = 'translateY(' + targetY + ')';
+      const h = feedHeight();
+      const targetY = direction === 'up' ? -(2 * h) : 0;
+      track.style.transform = 'translateY(' + targetY + 'px)';
       await waitTransition(track, 340);
 
       // 推进服务端游标，拿新当前 + 新邻居
@@ -234,8 +254,8 @@
         return;
       }
 
-      // 保存旧当前进度
-      saveProgressOfCurrent();
+      // 保存旧当前进度（强制：切走时确保位置最新，便于多步回切续播）
+      saveProgressOfCurrent(true);
 
       // DOM 节点轮换：
       //   up:  next槽视频->当前, 当前视频->prev槽, prev槽视频->next槽(腾空,装新next)
@@ -263,6 +283,11 @@
       v.muted = state.muted;
       v.loop = state.loop;
       attachVideoEvents(v);
+      // 回切(direction='down')时恢复进度：
+      //   - 立即回切：元素保留状态，currentTime 已在 3s 后，resumeProgress 内部跳过不覆盖
+      //   - 多步回切：元素被预加载/回收重载，currentTime≈0，按后端保存的进度恢复
+      //   - 前进(direction='up')不恢复，保持新视频从头播放
+      if (direction === 'down') resumeProgress(v, newCur.progress);
       playCurrent();
 
       // 对侧槽(旧当前)已是新邻居，校验
@@ -291,12 +316,12 @@
   }
 
   // ---------- 进度保存 ----------
-  function saveProgressOfCurrent() {
+  function saveProgressOfCurrent(force) {
     const v = videoOf(slots.current);
     const c = state.current;
     if (!v || !c) return;
     const now = Date.now();
-    if (now - state.lastSaveTs < 2000) return; // 节流
+    if (!force && now - state.lastSaveTs < 2000) return; // 节流
     state.lastSaveTs = now;
     apiPost('api/progress', { id: c.id, pos: v.currentTime || 0, dur: v.duration || 0 }).catch(() => {});
   }
@@ -375,8 +400,13 @@
   function toggleLoop() {
     state.loop = !state.loop;
     for (const k of ['prev', 'current', 'next']) videoOf(slots[k]).loop = state.loop;
-    btnLoop.classList.toggle('active', state.loop);
+    syncLoopUI();
     toast(state.loop ? '循环播放' : '单次播放');
+  }
+  function syncLoopUI() {
+    if (!btnLoopSetting) return;
+    btnLoopSetting.classList.toggle('on', state.loop);
+    btnLoopSetting.setAttribute('aria-pressed', state.loop ? 'true' : 'false');
   }
 
   // ---------- 进度条拖动 ----------
@@ -385,9 +415,16 @@
     const v = videoOf(slots.current);
     if (!v || !v.duration) return;
     const rect = progressBar.getBoundingClientRect();
-    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-    const ratio = Math.max(0, Math.min(1, x / rect.width));
-    v.currentTime = ratio * v.duration;
+    let ratio;
+    if (state.landscape) {
+      // 横屏模式：进度条随容器旋转 90°，屏幕上呈竖直方向，按 Y 轴定位
+      const y = e.touches ? e.touches[0].clientY : e.clientY;
+      ratio = (y - rect.top) / rect.height;
+    } else {
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      ratio = x / rect.width;
+    }
+    v.currentTime = Math.max(0, Math.min(1, ratio)) * v.duration;
     updateProgress();
   }
   progressBar.addEventListener('pointerdown', (e) => {
@@ -399,10 +436,10 @@
   });
 
   // ---------- 滑动手势 ----------
-  let touchStartY = 0, touchStartX = 0, touchStartT = 0, moved = false;
+  let touchStartY = 0, touchStartX = 0, touchStartT = 0, moved = false, lastTouchEnd = 0;
   const feed = $('#feed');
   feed.addEventListener('touchstart', (e) => {
-    if (e.target.closest('.right-rail, .top-bar, .bottom-bar, .side-panel, .progress')) return;
+    if (e.target.closest('.right-rail, .top-bar, .bottom-bar, .side-panel, .progress, .corner-mute')) return;
     touchStartY = e.touches[0].clientY;
     touchStartX = e.touches[0].clientX;
     touchStartT = Date.now();
@@ -420,20 +457,36 @@
     if (Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx)) {
       swipe(dy < 0 ? 'up' : 'down');
     } else if (!moved && dt < 300) {
+      lastTouchEnd = Date.now();
       handleTap(e);
     }
   }, { passive: true });
 
+  // 鼠标点击（桌面）：单击暂停/播放、双击收藏。触摸已处理时忽略浏览器合成的 click。
+  feed.addEventListener('click', (e) => {
+    if (Date.now() - lastTouchEnd < 500) return;
+    if (state.panelOpen || state.busy) return;
+    if (e.target.closest('.right-rail, .top-bar, .bottom-bar, .side-panel, .progress, .panel-center, .corner-mute')) return;
+    handleTap(e);
+  });
+
   // 鼠标滚轮（桌面）
   let wheelLock = false;
   feed.addEventListener('wheel', (e) => {
-    if (state.busy || state.panelOpen) return;
+    if (state.busy || state.panelOpen || state.landscape) return;
     if (Math.abs(e.deltaY) < 24) return;
     if (wheelLock) return;
     wheelLock = true;
     setTimeout(() => wheelLock = false, 500);
     swipe(e.deltaY > 0 ? 'up' : 'down');
   }, { passive: true });
+
+  // 视口变化（旋转 / 移动端地址栏显隐）后重新对齐当前槽，防错位
+  let resizeT;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => { if (!state.busy) snapToCurrent(true); }, 150);
+  });
 
   // 键盘
   window.addEventListener('keydown', (e) => {
@@ -464,32 +517,171 @@
     }
   }
 
-  // ---------- 面板：历史 ----------
-  async function openHistory() {
-    const panel = $('#panel-history');
+  // ---------- 封面缩略图（前端隐藏 video seek + canvas 抓帧，零后端依赖） ----------
+  const thumbCache = new Map();      // id -> dataURL | null
+  const thumbPending = new Map();    // id -> Promise
+  const thumbQueue = [];
+  let thumbWorking = false;
+  const thumbVideo = document.createElement('video');
+  thumbVideo.muted = true;
+  thumbVideo.playsInline = true;
+  thumbVideo.preload = 'metadata';
+  thumbVideo.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px;top:0;opacity:0;pointer-events:none';
+  document.body.appendChild(thumbVideo);
+  const thumbCanvas = document.createElement('canvas');
+  thumbCanvas.width = 240; thumbCanvas.height = 426;
+
+  const thumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        const el = e.target;
+        thumbObserver.unobserve(el);
+        ensureThumb(el.dataset.id).then((url) => applyThumb(el, url));
+      }
+    }
+  }, { root: $('#library-body'), rootMargin: '300px 0px' });
+
+  function ensureThumb(id) {
+    if (thumbCache.has(id)) return Promise.resolve(thumbCache.get(id));
+    if (thumbPending.has(id)) return thumbPending.get(id);
+    const p = new Promise((resolve) => {
+      thumbQueue.push({ id, resolve });
+      runThumbQueue();
+    });
+    thumbPending.set(id, p);
+    return p;
+  }
+
+  function runThumbQueue() {
+    if (thumbWorking) return;
+    const job = thumbQueue.shift();
+    if (!job) return;
+    thumbWorking = true;
+    generateThumb(job.id).then((url) => {
+      thumbCache.set(job.id, url);
+      thumbPending.delete(job.id);
+      job.resolve(url);
+      thumbWorking = false;
+      runThumbQueue();
+    });
+  }
+
+  function generateThumb(id) {
+    return new Promise((resolve) => {
+      const v = thumbVideo;
+      let settled = false;
+      const finish = (val) => {
+        if (settled) return; settled = true;
+        v.removeEventListener('loadedmetadata', onMeta);
+        v.removeEventListener('seeked', onSeeked);
+        v.removeEventListener('error', onErr);
+        resolve(val);
+      };
+      const onMeta = () => {
+        const d = v.duration || 0;
+        const t = d > 6 ? 1 : (d > 0 ? d * 0.1 : 0);
+        try { v.currentTime = t; } catch (e) { finish(null); }
+      };
+      const onSeeked = () => {
+        try {
+          const ctx = thumbCanvas.getContext('2d');
+          if (!drawCover(ctx, v, thumbCanvas.width, thumbCanvas.height)) { finish(null); return; }
+          finish(thumbCanvas.toDataURL('image/jpeg', 0.7));
+        } catch (e) { finish(null); } // 跨域污染或解码失败 -> 留占位图
+      };
+      const onErr = () => finish(null);
+      v.addEventListener('loadedmetadata', onMeta);
+      v.addEventListener('seeked', onSeeked);
+      v.addEventListener('error', onErr);
+      v.src = streamUrl(id);
+      v.load();
+      setTimeout(() => finish(null), 7000); // 安全超时
+    });
+  }
+
+  function drawCover(ctx, v, dw, dh) {
+    const vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh) return false;
+    const sr = vw / vh, dr = dw / dh;
+    let sx, sy, sw, sh;
+    if (sr > dr) { sh = vh; sw = vh * dr; sx = (vw - sw) / 2; sy = 0; }
+    else { sw = vw; sh = vw / dr; sx = 0; sy = (vh - sh) / 2; }
+    ctx.drawImage(v, sx, sy, sw, sh, 0, 0, dw, dh);
+    return true;
+  }
+
+  function applyThumb(el, url) {
+    if (!url) return;
+    el.style.backgroundImage = "url('" + url + "')";
+    const ph = el.querySelector('.lib-ph');
+    if (ph) ph.style.display = 'none';
+  }
+
+  function fmtLibTime(ts) {
+    const d = new Date(ts * 1000);
+    const now = new Date();
+    const hm = d.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    if (d.toDateString() === now.toDateString()) return hm;
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit' }) + ' ' + hm;
+  }
+
+  // ---------- 面板：历史 / 收藏 ----------
+  const libState = { tab: 'history', data: null };
+
+  async function openLibrary(tab) {
+    if (tab) libState.tab = tab;
+    const panel = $('#panel-library');
     panel.style.display = 'flex';
     requestAnimationFrame(() => panel.classList.add('open'));
     state.panelOpen = true;
-    const list = $('#history-list');
-    list.innerHTML = '<div class="history-empty">加载中...</div>';
-    try {
-      const s = await api('api/state');
-      if (!s.history || !s.history.length) {
-        list.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+    syncLibTabs();
+    libState.data = null; // 每次打开重新拉取，保证收藏/历史最新
+    await renderLibrary();
+  }
+
+  function syncLibTabs() {
+    document.querySelectorAll('#panel-library .tab').forEach((t) => {
+      t.classList.toggle('active', t.dataset.tab === libState.tab);
+    });
+  }
+
+  async function renderLibrary() {
+    const grid = $('#library-grid');
+    if (!libState.data) {
+      grid.innerHTML = '<div class="lib-empty">加载中...</div>';
+      try {
+        libState.data = await api('api/state');
+      } catch (e) {
+        grid.innerHTML = '<div class="lib-empty">加载失败</div>';
         return;
       }
-      list.innerHTML = '';
-      for (const h of s.history) {
-        const item = document.createElement('div');
-        item.className = 'history-item';
-        item.innerHTML =
-          '<span class="h-name">' + escapeHtml(h.name) + '</span>' +
-          (h.favorite ? '<span class="h-fav">♥</span>' : '') +
-          '<span class="h-time">' + new Date(h.ts * 1000).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) + '</span>';
-        item.onclick = () => { closePanels(); jumpTo(h.id); };
-        list.appendChild(item);
-      }
-    } catch (e) { list.innerHTML = '<div class="history-empty">加载失败</div>'; }
+    }
+    const s = libState.data;
+    let items = libState.tab === 'favorites' ? s.favorites : s.history;
+    // 历史为空但收藏有内容时，自动切到收藏页
+    if ((!items || !items.length) && libState.tab === 'history' && s.favorites && s.favorites.length) {
+      libState.tab = 'favorites';
+      syncLibTabs();
+      items = s.favorites;
+    }
+    if (!items || !items.length) {
+      grid.innerHTML = '<div class="lib-empty">' + (libState.tab === 'favorites' ? '暂无收藏' : '暂无历史记录') + '</div>';
+      return;
+    }
+    grid.innerHTML = '';
+    for (const it of items) {
+      const el = document.createElement('div');
+      el.className = 'lib-item';
+      el.dataset.id = it.id;
+      el.innerHTML =
+        '<div class="lib-ph"><svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16v12H4z" fill="none" stroke="currentColor" stroke-width="1"/><path d="M10 9l5 3-5 3z"/></svg></div>' +
+        (it.favorite ? '<span class="lib-fav">♥</span>' : '') +
+        '<div class="lib-meta"><div class="lib-name">' + escapeHtml(it.name || '') + '</div>' +
+        (it.ts ? '<div class="lib-time">' + fmtLibTime(it.ts) + '</div>' : '') + '</div>';
+      el.onclick = () => { closePanels(); jumpTo(it.id); };
+      grid.appendChild(el);
+      thumbObserver.observe(el);
+    }
   }
 
   async function openSettings() {
@@ -566,20 +758,44 @@
     return String(s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  // ---------- 横屏观影 ----------
+  // 进入横屏：视频旋转 90° 充满屏幕，把标题/进度条移到横屏 UI（复用同一组元素，
+  // 保留事件绑定与更新逻辑），禁用滑动切换。
+  function enterLandscape() {
+    if (state.landscape) return;
+    state.landscape = true;
+    document.getElementById('app').classList.add('landscape-mode');
+    const lsBottom = document.querySelector('.landscape-bottom');
+    lsBottom.appendChild($('#video-title'));
+    lsBottom.appendChild(document.querySelector('.progress-row'));
+  }
+  function exitLandscape() {
+    if (!state.landscape) return;
+    state.landscape = false;
+    document.getElementById('app').classList.remove('landscape-mode');
+    const bb = document.querySelector('.bottom-bar');
+    bb.appendChild($('#video-title'));
+    bb.appendChild(document.querySelector('.progress-row'));
+  }
+
   // ---------- 绑定按钮 ----------
   btnMute.onclick = toggleMute;
-  btnLoop.onclick = toggleLoop;
   btnFav.onclick = toggleFavorite;
-  $('#btn-history').onclick = openHistory;
+  if (btnLoopSetting) btnLoopSetting.onclick = toggleLoop;
+  $('#btn-history').onclick = () => openLibrary('history');
   $('#btn-settings').onclick = openSettings;
-  $('#btn-rescan').onclick = rescan;
   $('#btn-empty-rescan').onclick = rescan;
   $('#btn-setting-rescan').onclick = rescan;
-  $('#btn-close-history').onclick = closePanels;
+  $('#btn-close-library').onclick = closePanels;
   $('#btn-close-settings').onclick = closePanels;
+  $('#btn-landscape').onclick = enterLandscape;
+  $('#btn-portrait').onclick = exitLandscape;
+  document.querySelectorAll('#panel-library .tab').forEach((t) => {
+    t.onclick = () => { libState.tab = t.dataset.tab; syncLibTabs(); renderLibrary(); };
+  });
 
   // 初始状态：默认开循环、非静音
-  btnLoop.classList.add('active');
+  syncLoopUI();
   $('.ico-sound').style.display = '';
   $('.ico-muted').style.display = 'none';
 
