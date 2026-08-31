@@ -73,7 +73,10 @@ func (a *App) api(w http.ResponseWriter, r *http.Request, p string) {
 		return
 
 	case p == "/api/rescan" && r.Method == http.MethodPost:
-		go a.scanner.ScanAsync()
+		go func() {
+			_, _ = a.scanner.Scan()
+			a.states.ReconcileAll()
+		}()
 		writeJSON(w, map[string]any{"ok": true, "message": "已触发重扫"})
 		return
 
@@ -188,9 +191,9 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request, uid, forceID
 	}
 	if cur == "" {
 		writeJSON(w, map[string]any{
-			"empty":  true,
-			"total":  0,
-			"cursor": 0,
+			"empty":   true,
+			"total":   0,
+			"cursor":  0,
 			"current": nil,
 		})
 		return
@@ -207,6 +210,10 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request, uid, forceID
 		return
 	}
 	prog, _ := st.GetProgress(cur)
+	if forceID != "" {
+		// next/prev/jump 一完成就记录新当前，避免旧视频的延迟进度回写造成续播倒退。
+		st.SetLast(cur, prog.Pos)
+	}
 	last := st.GetLast()
 	writeJSON(w, map[string]any{
 		"empty":   false,

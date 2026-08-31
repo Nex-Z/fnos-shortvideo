@@ -35,6 +35,8 @@ type UserState struct {
 	dataDir string
 
 	Deck      []string                 `json:"deck"`
+	PrevDeck  []string                 `json:"prevDeck,omitempty"`
+	NextDeck  []string                 `json:"nextDeck,omitempty"`
 	Cursor    int                      `json:"cursor"`
 	Favorites []string                 `json:"favorites"`
 	History   []HistoryEntry           `json:"history"`
@@ -80,6 +82,19 @@ func (m *StateManager) Get(uid string) *UserState {
 	return st
 }
 
+// ReconcileAll 在视频索引更新后刷新所有已加载用户的播放队列。
+func (m *StateManager) ReconcileAll() {
+	m.mu.Lock()
+	users := make([]*UserState, 0, len(m.users))
+	for _, st := range m.users {
+		users = append(users, st)
+	}
+	m.mu.Unlock()
+	for _, st := range users {
+		st.reconcile(m.scanner)
+	}
+}
+
 func (st *UserState) file() string {
 	return filepath.Join(st.dataDir, st.uid+".json")
 }
@@ -94,6 +109,8 @@ func (st *UserState) load() {
 		return
 	}
 	st.Deck = tmp.Deck
+	st.PrevDeck = tmp.PrevDeck
+	st.NextDeck = tmp.NextDeck
 	st.Cursor = tmp.Cursor
 	st.Favorites = tmp.Favorites
 	st.History = tmp.History
@@ -128,7 +145,25 @@ func (st *UserState) reconcile(scanner *Scanner) {
 	defer st.mu.Unlock()
 	known := scanner.KnownIDs()
 	if len(known) == 0 {
+		status := scanner.Status()
+		// 首次启动扫描尚未完成时保留磁盘状态，避免短暂空索引误删用户数据。
+		if status.Running || status.LastAt == "" {
+			return
+		}
+		st.Deck = nil
+		st.PrevDeck = nil
+		st.NextDeck = nil
+		st.Cursor = 0
+		st.Favorites = []string{}
+		st.History = []HistoryEntry{}
+		st.Progress = map[string]ProgressEntry{}
+		st.Last = nil
+		st.save()
 		return
+	}
+	current := ""
+	if st.Cursor >= 0 && st.Cursor < len(st.Deck) {
+		current = st.Deck[st.Cursor]
 	}
 
 	// 过滤掉已不存在的 ID
@@ -155,20 +190,41 @@ func (st *UserState) reconcile(scanner *Scanner) {
 	}
 	rand.Shuffle(len(fresh), func(i, j int) { fresh[i], fresh[j] = fresh[j], fresh[i] })
 	st.Deck = append(st.Deck, fresh...)
+	// 相邻轮次依赖完整视频集合，重扫后统一作废并在轮末重新生成。
+	st.PrevDeck = nil
+	st.NextDeck = nil
 
 	// 队列空或游标越界 -> 整体洗牌
 	if len(st.Deck) == 0 {
 		return
 	}
-	if st.Cursor >= len(st.Deck) {
-		st.Cursor = len(st.Deck) - 1
-	}
-	if st.Cursor < 0 {
-		st.Cursor = 0
+	st.Cursor = 0
+	if current != "" {
+		for i, id := range st.Deck {
+			if id == current {
+				st.Cursor = i
+				break
+			}
+		}
 	}
 
-	// 清理收藏/进度中已失效的项（可选，保持整洁）
+	// 清理已失效的收藏、历史、进度与最近播放。
 	st.Favorites = filterIDs(st.Favorites, known)
+	cleanHistory := st.History[:0]
+	for _, h := range st.History {
+		if known[h.ID] {
+			cleanHistory = append(cleanHistory, h)
+		}
+	}
+	st.History = cleanHistory
+	for id := range st.Progress {
+		if !known[id] {
+			delete(st.Progress, id)
+		}
+	}
+	if st.Last != nil && !known[st.Last.ID] {
+		st.Last = nil
+	}
 	st.save()
 }
 
@@ -195,7 +251,27 @@ func (st *UserState) CurrentID() string {
 	return st.Deck[st.Cursor]
 }
 
-// Next 上滑：前进一个，到末尾则重新洗牌（首项避开当前），返回新当前 ID。
+// ensureNextDeckLocked 预生成下一轮，保证预加载 ID 与真正切换结果一致。
+// 调用者必须持有 st.mu。
+func (st *UserState) ensureNextDeckLocked() bool {
+	if len(st.NextDeck) > 0 || len(st.Deck) == 0 {
+		return false
+	}
+	st.NextDeck = append([]string(nil), st.Deck...)
+	rand.Shuffle(len(st.NextDeck), func(i, j int) {
+		st.NextDeck[i], st.NextDeck[j] = st.NextDeck[j], st.NextDeck[i]
+	})
+	cur := ""
+	if st.Cursor >= 0 && st.Cursor < len(st.Deck) {
+		cur = st.Deck[st.Cursor]
+	}
+	if len(st.NextDeck) > 1 && st.NextDeck[0] == cur {
+		st.NextDeck[0], st.NextDeck[1] = st.NextDeck[1], st.NextDeck[0]
+	}
+	return true
+}
+
+// Next 上滑：前进一个，到末尾则切换到预生成的新一轮。
 func (st *UserState) Next() string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -205,12 +281,10 @@ func (st *UserState) Next() string {
 	if st.Cursor < len(st.Deck)-1 {
 		st.Cursor++
 	} else {
-		// 到达末尾，重新洗牌，避免首项与当前相同
-		cur := st.Deck[st.Cursor]
-		rand.Shuffle(len(st.Deck), func(i, j int) { st.Deck[i], st.Deck[j] = st.Deck[j], st.Deck[i] })
-		if st.Deck[0] == cur && len(st.Deck) > 1 {
-			st.Deck[0], st.Deck[1] = st.Deck[1], st.Deck[0]
-		}
+		st.ensureNextDeckLocked()
+		st.PrevDeck = st.Deck
+		st.Deck = st.NextDeck
+		st.NextDeck = nil
 		st.Cursor = 0
 	}
 	st.save()
@@ -226,6 +300,12 @@ func (st *UserState) Prev() string {
 	}
 	if st.Cursor > 0 {
 		st.Cursor--
+	} else if len(st.PrevDeck) > 0 {
+		// 跨轮返回：当前轮保存为未来轮，再恢复上一轮末尾。
+		st.NextDeck = st.Deck
+		st.Deck = st.PrevDeck
+		st.PrevDeck = nil
+		st.Cursor = len(st.Deck) - 1
 	}
 	st.save()
 	return st.Deck[st.Cursor]
@@ -269,7 +349,7 @@ func (st *UserState) EnsureCurrent() string {
 	return st.Deck[st.Cursor]
 }
 
-// NeighborIDs 返回当前、上一个、下一个 ID（用于预加载；到边界返回空串）。
+// NeighborIDs 返回当前、上一个、下一个 ID。轮末会预生成下一轮首条用于预加载。
 func (st *UserState) NeighborIDs() (cur, prev, next string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -282,9 +362,19 @@ func (st *UserState) NeighborIDs() (cur, prev, next string) {
 	cur = st.Deck[st.Cursor]
 	if st.Cursor > 0 {
 		prev = st.Deck[st.Cursor-1]
+	} else if len(st.PrevDeck) > 0 {
+		prev = st.PrevDeck[len(st.PrevDeck)-1]
 	}
 	if st.Cursor < len(st.Deck)-1 {
 		next = st.Deck[st.Cursor+1]
+	} else {
+		created := st.ensureNextDeckLocked()
+		if len(st.NextDeck) > 0 {
+			next = st.NextDeck[0]
+		}
+		if created {
+			st.save()
+		}
 	}
 	return
 }
@@ -322,7 +412,10 @@ func (st *UserState) SaveProgress(id string, pos, dur float64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.Progress[id] = ProgressEntry{Pos: pos, Dur: dur, Ts: time.Now().Unix()}
-	st.Last = &LastPlayed{ID: id, Pos: pos}
+	// 切换动画结束后旧视频仍可能补交一次进度，不能让它覆盖新当前项。
+	if st.Cursor >= 0 && st.Cursor < len(st.Deck) && st.Deck[st.Cursor] == id {
+		st.Last = &LastPlayed{ID: id, Pos: pos}
+	}
 	st.save()
 }
 

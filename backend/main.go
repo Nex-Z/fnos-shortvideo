@@ -63,12 +63,14 @@ func main() {
 
 	scanner := newScanner(dataDir, roots)
 	scanner.Load()
+	states := newStateManager(dataDir, scanner)
 	// 启动时若无索引或授权目录有内容但索引为空，后台扫描
 	if len(scanner.Get().Videos) == 0 && len(roots) > 0 {
-		scanner.ScanAsync()
+		go func() {
+			_, _ = scanner.Scan()
+			states.ReconcileAll()
+		}()
 	}
-
-	states := newStateManager(dataDir, scanner)
 
 	app := &App{
 		scanner: scanner,

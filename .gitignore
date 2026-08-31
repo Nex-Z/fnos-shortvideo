@@ -6,6 +6,7 @@ shortvideo/app/ui/www/
 backend/data/
 data/
 *.fpk
+tools/fnpack.exe
 
 # 临时
 *.log

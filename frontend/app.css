@@ -12,11 +12,12 @@ button { background: none; border: none; color: inherit; cursor: pointer; font: 
 #track { position: absolute; top: 0; left: 0; width: 100%; height: 300%; will-change: transform; transition: transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1); }
 #track.no-anim { transition: none; }
 .slot { position: relative; width: 100%; height: 33.3333%; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; }
-.slot video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.slot video { width: 100%; height: 100%; object-fit: contain; background: #000; pointer-events: none; }
 
 /* === 覆盖层 === */
 #overlay { position: absolute; inset: 0; pointer-events: none; z-index: 10; }
 #overlay > * { pointer-events: auto; }
+.gesture-layer { position: absolute; inset: 0; z-index: 0; touch-action: none; }
 /* 大播放图标与加载指示不拦截点击，让单击穿透到视频/底层 feed */
 #overlay .play-tap, #overlay .center-hint { pointer-events: none; }
 

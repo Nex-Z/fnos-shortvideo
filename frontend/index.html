@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#000000" />
   <title>随机短视频</title>
   <link rel="stylesheet" href="app.css" />
@@ -12,13 +13,16 @@
     <!-- 视频流：3 槽轮播（上/当前/下） -->
     <div id="feed">
       <div id="track">
-        <div class="slot" data-pos="prev"><video playsinline webkit-playsinline preload="auto"></video></div>
-        <div class="slot" data-pos="current"><video playsinline webkit-playsinline preload="auto"></video></div>
-        <div class="slot" data-pos="next"><video playsinline webkit-playsinline preload="auto"></video></div>
+        <div class="slot" data-pos="prev"><video playsinline="playsinline" webkit-playsinline="webkit-playsinline" preload="auto" controlslist="nodownload noplaybackrate" disablepictureinpicture></video></div>
+        <div class="slot" data-pos="current"><video playsinline="playsinline" webkit-playsinline="webkit-playsinline" preload="auto" controlslist="nodownload noplaybackrate" disablepictureinpicture></video></div>
+        <div class="slot" data-pos="next"><video playsinline="playsinline" webkit-playsinline="webkit-playsinline" preload="auto" controlslist="nodownload noplaybackrate" disablepictureinpicture></video></div>
       </div>
 
       <!-- 覆盖层：交互控件 -->
       <div id="overlay">
+        <!-- 统一承接轻触与滑动，避免 iOS 将手势交给 video 并唤起系统播放器 -->
+        <div class="gesture-layer" aria-hidden="true"></div>
+
         <!-- 顶部：仅保留渐变遮罩（标题文字与循环按钮已移除） -->
         <div class="top-bar"></div>
 

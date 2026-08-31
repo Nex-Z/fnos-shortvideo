@@ -4,6 +4,8 @@
 
   // 服务端基础路径：取当前页面所在目录（统一网关 /app/shortvideo/ 或本地 /）
   const BASE = location.pathname.replace(/[^/]*$/, '');
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   // ---------- DOM ----------
   const $ = (s) => document.querySelector(s);
@@ -33,7 +35,8 @@
     prevId: '',
     nextId: '',
     total: 0,
-    muted: false,
+    // iOS 先以静音方式启动，避免无用户手势的有声 play() 被系统播放器接管。
+    muted: IS_IOS,
     loop: true,
     busy: false,      // 动画/切换中，拒绝新滑动
     panelOpen: false,
@@ -43,9 +46,20 @@
 
   // ---------- API ----------
   async function api(path, opts) {
-    const res = await fetch(BASE + path.replace(/^\//, ''), opts);
-    if (!res.ok) throw new Error('API ' + path + ' -> ' + res.status);
-    return res.json();
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const requestOpts = Object.assign({}, opts || {});
+    if (controller) requestOpts.signal = controller.signal;
+    const timeout = controller ? setTimeout(() => controller.abort(), 12000) : 0;
+    try {
+      const res = await fetch(BASE + path.replace(/^\//, ''), requestOpts);
+      if (!res.ok) throw new Error('API ' + path + ' -> ' + res.status);
+      return await res.json();
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('请求超时，请重试');
+      throw e;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
   const apiPost = (path, body) => api(path, {
     method: 'POST',
@@ -70,8 +84,25 @@
   function showLoading(on) { centerHint.style.display = on ? 'flex' : 'none'; }
 
   // ---------- 视频元素管理 ----------
+  function configureInlineVideo(v) {
+    // 属性必须在设置 src / play 之前存在；部分 iOS WebView 只读取 attribute。
+    v.playsInline = true;
+    v.setAttribute('playsinline', 'playsinline');
+    v.setAttribute('webkit-playsinline', 'webkit-playsinline');
+    v.setAttribute('x-webkit-airplay', 'deny');
+    v.controls = false;
+    v.removeAttribute('controls');
+    v.disablePictureInPicture = true;
+    v.setAttribute('disablepictureinpicture', '');
+    v.defaultMuted = state.muted;
+    v.muted = state.muted;
+  }
+
+  document.querySelectorAll('.slot video').forEach(configureInlineVideo);
+
   function setVideo(slot, info) {
     const v = videoOf(slot);
+    configureInlineVideo(v);
     if (!info || !info.id) { v.removeAttribute('src'); v.load(); return; }
     if (v.dataset.id !== info.id) {
       v.src = streamUrl(info.id);
@@ -95,17 +126,25 @@
     pauseAll(v);
   }
 
-  // 尝试播放；若被浏览器自动播放策略拒绝（未静音且无用户手势），显示播放按钮引导点击。
+  function syncMuteUI() {
+    btnMute.classList.toggle('active', !state.muted);
+    $('.ico-muted').style.display = state.muted ? '' : 'none';
+    $('.ico-sound').style.display = state.muted ? 'none' : '';
+  }
+
+  // 尝试播放；有声自动播放被拒绝时，统一切换为静音内联播放。
   function tryPlay(v) {
     v.play().then(() => {
       playTap.style.display = 'none';
     }).catch(() => {
-      // 通常是自动播放策略阻止；静音后可播放，并提示用户点击开声音
       if (!state.muted) {
-        v.muted = true;
-        v.play().catch(() => {});
-        showPlayTap();
-        toast('点击视频开启声音');
+        state.muted = true;
+        for (const k of ['prev', 'current', 'next']) videoOf(slots[k]).muted = true;
+        syncMuteUI();
+        v.play().then(() => {
+          playTap.style.display = 'none';
+          toast('已静音播放，点右下角开启声音');
+        }).catch(showPlayTap);
       } else {
         showPlayTap();
       }
@@ -366,8 +405,6 @@
     const v = videoOf(slots.current);
     if (!v) return;
     if (v.paused) {
-      // 用户手势下可恢复声音（若之前因自动播放策略被强制静音）
-      if (v.muted && !state.muted) v.muted = false;
       tryPlay(v);
       playTap.style.display = 'none';
     } else {
@@ -392,9 +429,7 @@
   function toggleMute() {
     state.muted = !state.muted;
     for (const k of ['prev', 'current', 'next']) videoOf(slots[k]).muted = state.muted;
-    btnMute.classList.toggle('active', !state.muted);
-    $('.ico-muted').style.display = state.muted ? '' : 'none';
-    $('.ico-sound').style.display = state.muted ? 'none' : '';
+    syncMuteUI();
     toast(state.muted ? '已静音' : '已开启声音');
   }
   function toggleLoop() {
@@ -436,31 +471,62 @@
   });
 
   // ---------- 滑动手势 ----------
-  let touchStartY = 0, touchStartX = 0, touchStartT = 0, moved = false, lastTouchEnd = 0;
+  let touchStartY = 0, touchStartX = 0, touchStartT = 0, moved = false, touchActive = false, lastTouchEnd = 0;
   const feed = $('#feed');
+  function resetTouchGesture() {
+    touchActive = false;
+    touchStartT = 0;
+    moved = false;
+  }
+  function resetInteractionState() {
+    resetTouchGesture();
+    dragging = false;
+    progressBar.classList.remove('dragging');
+    state.busy = false;
+    snapToCurrent(true);
+  }
   feed.addEventListener('touchstart', (e) => {
-    if (e.target.closest('.right-rail, .top-bar, .bottom-bar, .side-panel, .progress, .corner-mute')) return;
+    resetTouchGesture();
+    if (e.touches.length !== 1 || e.target.closest('.right-rail, .top-bar, .bottom-bar, .side-panel, .progress, .corner-mute')) return;
     touchStartY = e.touches[0].clientY;
     touchStartX = e.touches[0].clientX;
     touchStartT = Date.now();
     moved = false;
+    touchActive = true;
   }, { passive: true });
   feed.addEventListener('touchmove', (e) => {
+    if (!touchActive || e.touches.length !== 1) return;
     if (Math.abs(e.touches[0].clientY - touchStartY) > 8) moved = true;
-  }, { passive: true });
+    // 老版本 iOS WebView 不完整支持 touch-action，显式阻止视频/页面接管手势。
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
   feed.addEventListener('touchend', (e) => {
-    if (touchStartT === 0) return;
+    if (!touchActive || touchStartT === 0 || !e.changedTouches.length) return;
     const dy = e.changedTouches[0].clientY - touchStartY;
     const dx = e.changedTouches[0].clientX - touchStartX;
     const dt = Date.now() - touchStartT;
-    touchStartT = 0;
+    const wasMoved = moved;
+    resetTouchGesture();
     if (Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx)) {
       swipe(dy < 0 ? 'up' : 'down');
-    } else if (!moved && dt < 300) {
+    } else if (!wasMoved && dt < 300) {
       lastTouchEnd = Date.now();
       handleTap(e);
     }
   }, { passive: true });
+  feed.addEventListener('touchcancel', resetTouchGesture, { passive: true });
+
+  // iOS 系统播放器、切后台或 WebView 页面缓存返回后，确保不会残留 busy/拖动锁。
+  window.addEventListener('pageshow', resetInteractionState);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resetInteractionState();
+  });
+  document.querySelectorAll('.slot video').forEach((v) => {
+    v.addEventListener('webkitbeginfullscreen', () => {
+      if (IS_IOS) toast('当前客户端强制使用系统播放器，可尝试在 Safari 中打开');
+    });
+    v.addEventListener('webkitendfullscreen', resetInteractionState);
+  });
 
   // 鼠标点击（桌面）：单击暂停/播放、双击收藏。触摸已处理时忽略浏览器合成的 click。
   feed.addEventListener('click', (e) => {
@@ -794,10 +860,9 @@
     t.onclick = () => { libState.tab = t.dataset.tab; syncLibTabs(); renderLibrary(); };
   });
 
-  // 初始状态：默认开循环、非静音
+  // 初始状态：默认开循环；iOS 静音启动以争取内联播放。
   syncLoopUI();
-  $('.ico-sound').style.display = '';
-  $('.ico-muted').style.display = 'none';
+  syncMuteUI();
 
   // 启动
   snapToCurrent(true);
